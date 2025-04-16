@@ -7,7 +7,7 @@ output:
   pdf_document: default
 ---
 
-```{r setup, include=FALSE}
+```{r setup, include=TRUE, message=FALSE}
 library(knitr)
 library(stats)
 library(tidyverse)
