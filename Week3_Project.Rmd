@@ -1,0 +1,251 @@
+---
+title: "Week3_Project"
+author: "Author: Redacted :P"
+date: "2025-03-21"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+library(stats)
+library(tidyverse)
+library(ggplot2)
+library(ggtext)
+library(lubridate)
+library(glue)
+library(cowplot)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##### Import the Data:
+
+```{r import}
+data_url = "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+nypd <- read.csv(data_url, na.strings = c("NA","","(null)"))
+
+```
+
+##### Data Summary
+According to the city of New York: "This is a breakdown of every shooting incident that occurred in NYC going back to 2006 through the end of 2024. This data is manually extracted every quarter and reviewed by the Office of Management Analysis and Planning before being posted on the NYPD website. Each record represents a shooting incident in NYC and includes information about the event, the location and time of occurrence. In addition, information related to suspect and victim demographics is also included."
+
+I have included a data summary of all the variables in the dataset as well as the first few rows of the data after the summary for illustration purposes.
+
+
+\tiny
+```{r summary}
+summary(nypd)
+head(nypd)
+```
+\normalsize
+
+
+The occurance dates and times are in "character" format, and we need them in date and time formats. There are many rows with NAs as well.
+
+
+\tiny
+```{r tidying}
+## FIX TYPOS by changing them to NAs because we don't know what age group they actually meant to put
+nypd <- nypd %>%
+  mutate(PERP_AGE_GROUP = case_when(PERP_AGE_GROUP == 1020 ~ NA,
+                                  PERP_AGE_GROUP == 1028 ~ NA,
+                                  PERP_AGE_GROUP == 224 ~ NA,
+                                  PERP_AGE_GROUP == 940 ~ NA,
+                                  .default = PERP_AGE_GROUP)) %>%
+  mutate(VIC_AGE_GROUP = case_when(VIC_AGE_GROUP == 1022 ~ NA,
+                                   .default = VIC_AGE_GROUP))
+
+## FIX variable data types from character to time/factor/boolean where appropriate
+nypd <- nypd %>%
+  mutate(OCCUR_DATE = mdy(OCCUR_DATE)) %>%
+  mutate(OCCUR_TIME = hms(OCCUR_TIME)) %>%
+  mutate_at(vars(PERP_AGE_GROUP,PERP_SEX,PERP_RACE,VIC_AGE_GROUP,VIC_SEX,VIC_RACE,
+                 LOCATION_DESC,LOC_CLASSFCTN_DESC,LOC_OF_OCCUR_DESC,BORO), factor) %>%
+  mutate(STATISTICAL_MURDER_FLAG = case_when(STATISTICAL_MURDER_FLAG == "true" ~ TRUE,
+                                             STATISTICAL_MURDER_FLAG == "false" ~ FALSE,
+                                   .default = NA)) %>%
+  ## Remove unwanted variables
+  select(-c(Latitude,Longitude,Lon_Lat,X_COORD_CD,Y_COORD_CD)) %>%
+  select(-c(PRECINCT,JURISDICTION_CODE,INCIDENT_KEY))
+
+```
+\normalsize
+
+Firstly, I wanted to examine the incidents by neighborhood.
+
+
+\tiny
+```{r figure1caption, echo=FALSE}
+caption_text = " \n**Figure 1. Incidents by NYC Borough.** Incidents are separated by incident type: non-murders (orange), and murders (blue)."
+```
+```{r borough, echo=TRUE}
+## Incidents by borough
+boro_murders <- nypd %>%
+  group_by(BORO) %>%
+  summarize(murders = sum(STATISTICAL_MURDER_FLAG), 
+                          non_murders = 
+              length(STATISTICAL_MURDER_FLAG)-sum(STATISTICAL_MURDER_FLAG))
+
+ggplot(nypd, aes(x = BORO, fill = STATISTICAL_MURDER_FLAG)) +
+  geom_bar(stat = "count", position = "stack") +
+  labs(x = "Borough", 
+       y = "# of Incidents", 
+       title = "Incidents by New York City District",
+       caption = caption_text) +
+  coord_flip() +
+  scale_fill_discrete(name = "Incident Type",labels = c("Non-murder","Murder")) +
+  theme(plot.caption = element_textbox_simple(padding = margin(5, 10, 5, 0)))
+
+```
+\normalsize
+
+It is evident that most of the incidents occur in Brooklyn for non-murders, murders, and total shooting incidents. Staten Island has the least. However, this data does not take borough population into account, so it would be prudent to obtain overall population data to get an "incident per 1000" statistic to accurate compare relative safety of different NYC boroughs. This is inherently biased because there is nothing to normalize the incidents to, possibly over-inflating the reader's view of crime in Brooklyn and down-playing the crime in Staten Island.
+
+Next, I wanted to look at the different age groups and the sex of perpetrators versus their victims, and vice-versa. Each of the "age group" graphs tells the same story, although having different graphs helps the viewer understand each perspective better than simply having one graph. The data needed to be cleaned further because there were many NAs and unknowns in the perpetrator category. That is to be expected, however, because not all victims would see their perpetrator and would not know their age/sex/etc. These incidents where the perpetrator's age is NA/Unknown were not included in these graphs.
+
+
+\tiny
+```{r perps_and_vics}
+perps_and_vics <- nypd %>%
+  filter(!is.na(PERP_AGE_GROUP), PERP_AGE_GROUP!="UNKNOWN") %>%
+  filter(!is.na(VIC_AGE_GROUP), VIC_AGE_GROUP!="UNKNOWN") %>%
+  filter(PERP_SEX != "U", VIC_SEX != "U") %>%
+  select(-c(OCCUR_DATE,OCCUR_TIME,BORO,
+            LOC_OF_OCCUR_DESC,LOC_CLASSFCTN_DESC,LOCATION_DESC,
+            STATISTICAL_MURDER_FLAG))
+
+plot1 <- ggplot(perps_and_vics, aes(x = PERP_AGE_GROUP, 
+                                    fill = VIC_AGE_GROUP)) +
+  geom_bar(stat = "count", position = "stack") +
+  labs(x = "Perp Age", y = "Frequency", 
+       title = "Perp Age vs. Victim Age",
+       fill = "Victim Age") +
+  theme(axis.text.x = element_text(size = 6),
+        axis.title.x = element_text(size = 9))
+  
+plot2 <- ggplot(perps_and_vics, aes(x = VIC_AGE_GROUP, 
+                                    fill = PERP_AGE_GROUP)) +
+  geom_bar(stat = "count", position = "stack") +
+  labs(x = "Victim Age", y = "Frequency", 
+       title = "Victim Age vs. Perp Age",
+       fill = "Perp Age") +
+  theme(axis.text.x = element_text(size = 6),
+        axis.title.x = element_text(size = 9))
+
+plot3 <- ggplot(perps_and_vics, aes(x = PERP_SEX, 
+                                    fill = VIC_SEX)) +
+  geom_bar(stat = "count",position = "dodge2") + 
+  labs(x = "Perpetrator Sex", y = "Frequency",
+       title = "Sex of Perpetrators and Their Targets",
+       fill = "Sex of Victim")
+
+
+plot_grid(plot1,plot2,plot3, labels = "AUTO")
+```
+\normalsize
+
+**Figure 2. Perpetrator vs. Victim Demographics.** The age groups of the victims for each perpetrator age groups is shown in (**Figure 2A**) while the age groups of the perpetrators targeting each of the victim age groups are shown on the right (**Figure 2B**). The sexes being targeted by each sex of the perpetrators are shown in (**Figure 2C**).
+
+
+
+
+Most of the perpetrators are between the ages of 18-24, followed closely by 25-44 year olds. Most of their victims are also in those age groups, with nearly no crime being committed by seniors (65+). Seniors are also the age group that have the least amount of incidents targeting them. In both figures **2A** and **2B**, it is evident that the incidents targeting 18-24 year olds and 25-44 year olds are mostly performed by those in the same age groups.
+
+In **Figure 2C**, we can see that very few shootings are performed by females, and the vast majority of shootings is done by males. Most male perpetrators target other males as well.
+
+This data is somewhat biased because incidents where the perpetrator demographics were either unknown or not recorded were not included in **Figure 2**. Therefore, the victims of those incidents were also not included. This shifts the data to give greater weight to victims who saw their attacker and were able to identity their age/sex.
+
+Now that we've looked at the demographic information, let's look at the general trends of incidents over time.
+
+
+\tiny
+```{r figure3caption, echo=FALSE}
+caption_text = "**Figure 3. NYC Incidents over Time.** Incidents for each month are shown, separated by incident type: total incidents (green), and murders (red). Lowess smoothing curves show the general local trends over time."
+```
+```{r IncidentsOverTime, echo=TRUE, message=FALSE}
+## Group data by month
+incidents_by_date <- nypd %>%
+  group_by(date = floor_date(OCCUR_DATE, "month")) %>%
+  summarize(total = length(STATISTICAL_MURDER_FLAG), 
+            murders = sum(STATISTICAL_MURDER_FLAG),
+            non_murders = 
+              length(STATISTICAL_MURDER_FLAG) - sum(STATISTICAL_MURDER_FLAG)) %>%
+  ungroup()
+
+cols <- c("Total"="seagreen","Murders"="salmon",
+          "Lowess Curve: Total"="darkgreen", "Lowess Curve: Murders"="red")
+ggplot(incidents_by_date, aes(date)) +
+  geom_line(aes(y = total, colour = "Total")) +
+  geom_line(aes(y = murders, colour = "Murders")) +
+  geom_smooth(aes(y = total, colour = "Lowess Curve: Total")) +
+  geom_smooth(aes(y = murders, colour = "Lowess Curve: Murders"))+
+  scale_colour_manual(name="Incidents",values=cols, 
+                      limits = c("Total","Murders","Lowess Curve: Total","Lowess Curve: Murders")) +
+  scale_x_date(date_breaks = "2 years", date_labels = "%m/%y") +
+  labs(x = "Date", 
+       y = "Incidents", 
+       title = "Incidents over Time",
+       caption = caption_text) +
+  theme(plot.caption = element_textbox_simple(padding = margin(15, 10, 5, 0)))
+```
+\normalsize
+
+All incidents that were reported to the NYPD were included in this data. This is an example of reporting bias, in which victims of incidents might be less likely to report incidents if they fear retaliation, distrust law enforcement, or believe their experiences will not be taken seriously. Based on reported incidents (both total incidents and murders), **Figure 3** shows a general decreasing trend from January 2006 until around January 2017. We then see an overall increasing trend in more recent years from 2017 to 2024. Let's take a closer look at the recent data.
+
+
+\tiny
+```{r figure4caption, echo=FALSE}
+caption_text = "**Figure 4. Recent NYC Incidents over Time.** Incidents for each month are shown, separated by incident type: total incidents (green), and murders (red). Linear models for each incident type with their respective linear regression equations shown on the graph demonstrates the overall trend over time."
+```
+```{r RecentIncidents, echo=TRUE, message=FALSE}
+## Recent Incidents over time
+
+## Filter data to include everything after 2017-01-01.
+recent_incidents <- incidents_by_date %>%
+  filter(date >= "2017-01-01")
+
+## Linear models for both total incidents and murders over time
+lm_totals <- lm(data = recent_incidents, total ~ date)
+lm_murders <- lm(data = recent_incidents, murders ~ date)
+
+## Function for displaying lm equation on graph in terms of per year instead of per day
+lm_eqn <- function(lm,yvar){
+  a = format(unname(coef(lm)[1]), digits = 3)
+  b = format(unname(coef(lm)[2]*7*52), digits = 4)
+  ## b coefficient refers to change per day.
+  ## Multiplied by 7 for 7days/wk, and by 52 for 52wks/yr
+  glue('{yvar} = {a} + {b}*year')
+}
+
+recent_cols <- c("Total"="seagreen","Murders"="salmon",
+                         "Linear Model: Total"="darkgreen", 
+                 "Linear Model: Murders"="red")
+
+ggplot(recent_incidents, aes(date)) +
+  geom_line(aes(y = total, colour = "Total")) +
+  geom_line(aes(y = murders, colour = "Murders")) +
+  #geom_smooth(color = "darkgreen") +
+  geom_smooth(method = "lm", aes(y = total, colour = "Linear Model: Total")) +
+  geom_smooth(method = "lm", aes(y = murders, colour = "Linear Model: Murders"))+
+  scale_colour_manual(name="Incidents",values=recent_cols, limits = c("Total","Murders","Linear Model: Total","Linear Model: Murders")) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%m/%y") +
+  labs(x = "Date", 
+       y = "Incidents", 
+       title = "Incidents over Time",
+       caption = caption_text) +
+  theme(plot.caption = element_textbox_simple(padding = margin(15, 10, 5, 0))) +
+  annotate("text", x = date("2018-07-01"), y=140, 
+           label = lm_eqn(lm_totals,"total"), color = "darkgreen", size = 3) +
+  annotate("text", x = date("2022-03-01"), y=60, 
+           label = lm_eqn(lm_murders,"murders"), color = "red", size = 3)
+```
+\normalsize
+
+In **Figure 4**, it shows that in most recent years (since 2017), overall total crime has been increasing by approximately 10.48 incidents per year, with approximately 2.3 more murders happening each year on average. It would be prudent, however, to normalize this data based on population size, since populations are usually expected to increase over time, leading to a biased perception of the data. Without normalizing to population density, we see an overall trend of crime increasing with each year, but it could in actuality be decreasing if we measured by incidents per capita.
+
+
+
+```{r sessionInfo}
+sessionInfo()
+```

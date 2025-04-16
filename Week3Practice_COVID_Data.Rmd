@@ -1,0 +1,105 @@
+---
+title: "Week3Practice_COVID_Data"
+author: "Kirsten Arnold"
+date: "2025-03-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+library(tidyverse)
+library(ggplot2)
+library(lubridate)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Get the file locations for importing the data:
+
+```{r filenames}
+#All the same starting url
+url_in <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/refs/heads/master/csse_covid_19_data/csse_covid_19_time_series/"
+file_names <- c(
+  "time_series_covid19_confirmed_global.csv",
+  "time_series_covid19_confirmed_US.csv",
+  "time_series_covid19_deaths_global.csv",
+  "time_series_covid19_deaths_US.csv")
+urls <- str_c(url_in,file_names)
+```
+
+Import the data:
+
+```{r import}
+global_cases <- read.csv(urls[1], check.names = FALSE, na.strings = c("NA",""))
+US_cases <- read.csv(urls[2], check.names = FALSE, na.strings = c("NA",""))
+global_deaths <- read.csv(urls[3], check.names = FALSE, na.strings = c("NA",""))
+US_deaths <- read.csv(urls[4], check.names = FALSE, na.strings = c("NA",""))
+```
+
+Clean up the data to be more R-friendly:
+
+```{r tidying}
+## Global Cases
+global_cases <- global_cases %>%
+  pivot_longer(cols = -c('Province/State','Country/Region',Lat,Long), #Everything else gets its own row
+               names_to = "date", 
+               #what was the column headings are now going to go under a new variable called "date"
+               values_to = "cases") %>%
+               #what was the values in each are now going to go into column called "cases"
+  select(-c(Lat,Long)) #select all columns except Lat and Long (we don't need)
+
+## Global Deaths
+global_deaths <- global_deaths %>%
+  pivot_longer(cols = -c('Province/State','Country/Region',Lat,Long), #Everything else gets its own row
+               names_to = "date", 
+               #what was the column headings are now going to go under a new variable called "date"
+               values_to = "deaths") %>%
+               #what was the values in each are now going to go into column called "cases"
+  select(-c(Lat,Long)) #select all columns except Lat and Long (we don't need)
+
+## Join Global Cases and Deaths into one table
+global <- global_cases %>%
+  full_join(global_deaths) %>%
+  rename(Country_Region = 'Country/Region', #rename to valid variable names
+         Province_State = 'Province/State') %>%
+  mutate(date = mdy(date)) %>% #reformat info in date column 
+  filter(cases > 0) #filter out days where cases = 0
+
+## US Cases
+US_cases <- US_cases %>%
+  pivot_longer(cols = -(UID:Combined_Key),
+               names_to = "date",
+               values_to = "cases") %>%
+  select(c(Admin2,Province_State,Country_Region,Combined_Key,date,cases)) %>%
+  mutate(date = mdy(date))
+
+## US Deaths
+US_deaths <- US_deaths %>%
+  pivot_longer(cols = -(UID:Population),
+               names_to = "date",
+               values_to = "deaths") %>%
+  select(c(Admin2:deaths)) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(Lat,Long_))
+
+## Combine US cases and deaths
+US <- US_cases %>%
+  full_join(US_deaths)
+
+#Now we have population data for the US but not for global
+
+global <- global %>%
+  unite("Combined_Key",
+        c(Province_State, Country_Region),
+        sep = ", ",
+        na.rm = TRUE,
+        remove = FALSE)
+
+uid_lookup_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/refs/heads/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+
+uid <- read.csv(uid_lookup_url, na.strings = c("NA",""))
+uid <- uid %>%
+  select(-c(Lat, Long_, code3, iso2, iso3, Combined_Key, Admin2, UID, FIPS))
+global <- global %>%
+  left_join(uid, by = c("Province_State", "Country_Region")) %>%
+  select(Province_State, Country_Region, Combined_Key, date, cases, deaths, Population)
+```
