@@ -356,3 +356,8 @@ In the US, there were approximately 108,721 new cases every day between January 
 The data is only as accurate as the reports. People may have been suffering from COVID at home without being diagnosed, meaning that COVID cases could be under-represented. Deaths, on the other hand, are always reported. This means that the 1.1% death rate of COVID cases could be overestimated.
 
 Another source of bias could be due to countries not reporting accurate numbers or information. For instance, North Korea had 1 case and 6 deaths. It is not possible to have more deaths than cases due to COVID 19, so it is likely that either the information being distributed from North Korea is incorrect or there is a typo in the data.
+
+
+```{r sessionInfo}
+sessionInfo()
+```
