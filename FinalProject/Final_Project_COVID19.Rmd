@@ -1,0 +1,358 @@
+---
+title: "DTSA_5301_Final_Project"
+author: 'Author: Redacted :P'
+date: "2025-04-18"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+To knit this document, you will need the following packages:
+
+```{r setup, include=TRUE, message=FALSE, warning=FALSE}
+library(knitr)
+library(stats)
+library(tidyverse)
+library(ggplot2)
+library(lubridate)
+library(sf)
+library(devtools)
+# If you do not have urbnmapr, you can install using devtools
+# devtools::install_github("UrbanInstitute/urbnmapr")
+library(urbnmapr)
+library(scales)
+library(maps)
+library(mapproj)
+library(glue)
+library(gridExtra)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## About the Dataset
+
+This [COVID19 dataset](https://github.com/CSSEGISandData/COVID-19/tree/master/csse_covid_19_data/csse_covid_19_time_series) was updated daily from case reports. The dataset includes COVID 19 cases/deaths from January 22, 2020 to March 9, 2023. Each record of cases/deaths are the total cumulative cases, not new cases/deaths for each date. Cases and deaths were also recorded for non-nations, such as cruise ships, which were excluded from data analysis. Countries without population data (Antartica) were also excluded. For analysis in the United States, only US states were included, not US territories such as Puerto Rico and Guam.
+
+```{r Import_data, include=FALSE, message=FALSE}
+#All the same starting url
+url_in <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/refs/heads/master/csse_covid_19_data/csse_covid_19_time_series/"
+file_names <- c(
+  "time_series_covid19_confirmed_global.csv",
+  "time_series_covid19_confirmed_US.csv",
+  "time_series_covid19_deaths_global.csv",
+  "time_series_covid19_deaths_US.csv")
+urls <- str_c(url_in,file_names)
+
+global_cases <- read.csv(urls[1], check.names = FALSE, na.strings = c("NA",""))
+US_cases <- read.csv(urls[2], check.names = FALSE, na.strings = c("NA",""))
+global_deaths <- read.csv(urls[3], check.names = FALSE, na.strings = c("NA",""))
+US_deaths <- read.csv(urls[4], check.names = FALSE, na.strings = c("NA",""))
+```
+```{r tidy_global, include=FALSE, message=FALSE}
+## Global cases
+global_cases <- global_cases %>%
+  pivot_longer(cols = -c('Province/State','Country/Region',Lat,Long), #Everything else gets its own row
+               names_to = "date", 
+               #what was the column headings are now going to go under a new variable called "date"
+               values_to = "cases") %>%
+  #what was the values in each are now going to go into column called "cases"
+  select(-c(Lat,Long)) #select all columns except Lat and Long (we don't need)
+
+## Global Deaths
+global_deaths <- global_deaths %>%
+  pivot_longer(cols = -c('Province/State','Country/Region',Lat,Long), 
+               #Everything else gets its own row
+               names_to = "date", 
+               #what was the other columns are now going to become a new variable called "date"
+               values_to = "deaths") %>%
+  #what was the values in each are now going to go into column called "deaths"
+  select(-c(Lat,Long)) #select all columns except Lat and Long (we don't need)
+
+## Join Global Cases and Deaths into one table
+
+global <- global_cases %>%
+  full_join(global_deaths) %>%
+  rename(Country_Region = 'Country/Region', #rename to valid variable names
+         Province_State = 'Province/State') %>%
+  mutate(date = mdy(date)) %>% #reformat info in date column 
+  filter(cases > 0) #filter out days where cases = 0
+```
+```{r tidy_US, include=FALSE, message=FALSE}
+## US Cases
+US_cases <- US_cases %>%
+  pivot_longer(cols = -(UID:Combined_Key),
+               names_to = "date",
+               values_to = "cases") %>%
+  select(c(UID, FIPS, Admin2,Province_State,Country_Region,Combined_Key,date,cases)) %>%
+  mutate(date = mdy(date))
+
+## US Deaths
+US_deaths <- US_deaths %>%
+  pivot_longer(cols = -(UID:Population),
+               names_to = "date",
+               values_to = "deaths")
+US_deaths <- US_deaths %>%
+  select(-c(iso2,iso3,code3,Lat,Long_)) %>%
+  mutate(date = mdy(date))
+
+## Combine US cases and deaths into one table
+US <- US_cases %>%
+  full_join(US_deaths)
+
+## Rename Admin2 column to "County"
+US <- US %>%
+  rename(County = 'Admin2')
+```
+```{r grouping_US, include=FALSE, message=FALSE}
+## GROUP BY STATE - 
+
+# first group by country to get the total cumulative cases for each county
+# then group by state by adding up all the counties
+
+US_by_county <- US %>%
+  group_by(County, Province_State, Country_Region) %>%
+  summarize(cases = max(cases),
+            deaths = max(deaths),
+            Population = max(Population)) %>%
+  #not using sum because we don't want to add up the same cases/deaths/populations multiple times
+  ungroup()
+
+US_by_state <- US_by_county %>%
+  group_by(Province_State, Country_Region) %>%
+  summarize(cases = sum(cases), #now we can add up all the totals from each county
+            deaths = sum(deaths),
+            Population = sum(Population)) %>%
+  mutate(cases_per_mil = cases * 1000000/Population) %>% #normalize to population size
+  mutate(deaths_per_mil = deaths * 1000000/Population) %>%
+  select(Province_State, Country_Region,
+         cases,deaths,Population,cases_per_mil, deaths_per_mil) %>%
+  ungroup()
+
+# US territories(not states) and cruise ships that should not be included in the heatmap
+not_states = c('American Samoa', 'Diamond Princess', 'Grand Princess', 
+               'Guam', 'Northern Mariana Islands', 'Puerto Rico', 
+               'Virgin Islands')
+
+# Filter out US territories and cruise ships
+US_by_state <- US_by_state %>%
+  filter(!Province_State %in% not_states)
+```
+```{r grouping_global, include=FALSE, message=FALSE}
+## First need population data for countries
+uid_lookup_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/refs/heads/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+
+uid <- read.csv(uid_lookup_url, na.strings = c("NA",""))
+uid <- uid %>%
+  filter(is.na(Province_State)) %>% #only want population data for countries, not their provinces
+  select(c(Country_Region, Population))
+
+## Grouping global data - first by province, then by country
+global_by_province <- global %>%
+  group_by(Province_State, Country_Region) %>%
+  summarize(cases = max(cases),
+          deaths = max(deaths)) %>%
+  ungroup()
+
+global_by_country <- global_by_province %>%
+  group_by(Country_Region) %>%
+  summarize(cases = sum(cases),
+            deaths = sum(deaths)) %>%
+  ungroup()
+
+## Add population data
+global_by_country <- global_by_country %>%
+  left_join(uid, by = "Country_Region")
+
+global_by_country <- global_by_country %>%
+  filter(!is.na(Population)) %>% # Get rid of any regions with population of 0/NA
+  mutate(cases_per_mil = cases * 1000000/Population) %>% #normalize cases/deaths to population
+  mutate(deaths_per_mil = deaths * 1000000/Population)
+```
+
+## Global Visualizations and Analysis
+
+Main questions:
+
+  - Which countries had the highest number of total cases? Deaths?
+  - Which countries had the highest number of cases per million? Deaths per million?
+
+At a glance, these questions would be easiest to visualize with a heatmap.
+
+```{r global_heatmap_totals, fig.height = 6, echo=FALSE}
+# Get world map data for heatmap
+world_map <- map_data("world")
+# Get rid of Antarctica
+world_map <- filter(world_map, region != "Antarctica")
+# Match US country name to what is in our dataset
+world_map$region[world_map$region == "USA"] <- "US"
+
+# Plot total cases
+total_cases <- ggplot(global_by_country) +
+  geom_map(dat=world_map, map = world_map, aes(map_id=region), 
+           fill="white", color="#7f7f7f", linewidth=0.25) +
+  geom_map(map=world_map, aes(map_id = Country_Region, fill = cases), linewidth=0.25) +
+  scale_fill_gradient(low = "aliceblue", high = "darkblue", 
+                      name = "Total Cases", labels = comma) +
+  labs(title = "Global Heatmap of COVID19 Total Cases") +
+  expand_limits(x = world_map$long, y = world_map$lat) +
+  labs(x="", y="") +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()) +
+  coord_quickmap()
+
+# Plot total deaths
+total_deaths <- ggplot(global_by_country) +
+  geom_map(dat=world_map, map = world_map, aes(map_id=region), 
+           fill="white", color="#7f7f7f", linewidth=0.25) +
+  geom_map(map=world_map, aes(map_id = Country_Region, fill = deaths), linewidth=0.25) +
+  scale_fill_gradient(low = "aliceblue", high = "darkblue", 
+                      name = "Total Deaths", labels = comma) +
+  labs(title = "Global Heatmap of COVID19 Total Deaths") +
+  expand_limits(x = world_map$long, y = world_map$lat) +
+  labs(x="", y="") +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()) +
+  coord_quickmap()
+
+grid.arrange(total_cases, total_deaths, nrow=2)
+```
+
+We can see that the United States has the most overall cases and deaths than any other country by far. However, the US has the 3rd most populated country behind India (1st) and China (2nd). When the data is viewed like this, it can be difficult to compare the US to smaller, less-populated countries like France or Japan.
+
+Therefore, I wanted to examine cases/deaths per million, because when the data is normalized by population, we can more easily directly compare countries to each other.
+
+```{r global_heatmap_normalized, fig.height = 6, echo=FALSE}
+# Plot cases per million
+cases_per_capita <- ggplot(global_by_country) +
+  geom_map(dat=world_map, map = world_map, aes(map_id=region), 
+           fill="white", color="#7f7f7f", linewidth=0.25) +
+  geom_map(map=world_map, aes(map_id = Country_Region, fill = cases_per_mil), linewidth=0.25) +
+  scale_fill_gradient(low = "aliceblue", high = "darkblue", 
+                      name = "Cases per million", labels = comma) +
+  labs(title = "Global heatmap of COVID19 cases per Million") +
+  expand_limits(x = world_map$long, y = world_map$lat) +
+  labs(x="", y="") +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank())+
+  coord_quickmap()
+
+# Plot deaths per million
+deaths_per_capita <- ggplot(global_by_country) +
+  geom_map(dat=world_map, map = world_map, aes(map_id=region), 
+           fill="white", color="#7f7f7f", linewidth=0.25) +
+  geom_map(map=world_map, aes(map_id = Country_Region, fill = deaths_per_mil), linewidth=0.25) +
+  scale_fill_gradient(low = "aliceblue", high = "darkblue", 
+                      name = "Deaths per million", labels = comma) +
+  labs(title = "Global heatmap of COVID19 deaths per Million") +
+  expand_limits(x = world_map$long, y = world_map$lat) +
+  labs(x="", y="") +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()) +
+  coord_quickmap()
+
+grid.arrange(cases_per_capita, deaths_per_capita, nrow=2)
+```
+
+We can see here that when we normalize the cases and deaths to the country's population, countries in Europe had the most cases per capita. This could be due to areas in Europe being more densely populated, leading to greater spread of the disease. We also see that despite places like Europe and Australia having the most cases per million, the death rates for these places are much lower than in Peru, which had hundreds of thousands of fewer cases per million than Europe. This could be due to differences in the quantity and/or quality of healthcare services between the two, or it could be differences in the average age of people contracting COVID 19, but more data and analysis on healthcare resources is required to answer this question.
+
+## United States Visualizations and Analysis
+
+Now that we've seen the cases/deaths worldwide, let's take a look at the US. Let's skip the totals and go directly to cases/deaths per million so that we can directly compare states after normalizing to population size. Which US states had the highest case/death rates?
+
+```{r US_heatmaps, fig.height = 6, echo=FALSE, message=FALSE, warning=FALSE}
+## US Choropleth map with Alaska, Hawaii, and Washington DC 
+states_sf <- get_urbn_map("states", sf = TRUE)
+
+## Add polygon data for heatmap and change name of Province_State column to match choropleth map data
+US_by_state <- US_by_state %>%
+  rename(state_name = Province_State) %>%
+  left_join(states_sf, by = "state_name")
+
+USchoropleth_cases <- ggplot(US_by_state, aes(geometry = geometry)) +
+  geom_sf(mapping = aes(fill = cases_per_mil),
+          color = "#ffffff", size = 0.25) +
+  scale_fill_gradient(high = "darkblue", low = "aliceblue") +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        panel.background = element_blank()) +
+  labs(fill = "Cases per million",
+       title = "COVID 19 US Heatmap - Cases per million")
+
+USchoropleth_deaths <- ggplot(US_by_state, aes(geometry = geometry)) +
+  geom_sf(mapping = aes(fill = deaths_per_mil),
+          color = "#ffffff", size = 0.25) +
+  scale_fill_gradient(high = "darkblue", low = "aliceblue") +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        panel.background = element_blank()) +
+  labs(fill = "Deaths per million",
+       title = "COVID 19 US Heatmap - Deaths per million")
+
+grid.arrange(USchoropleth_cases, USchoropleth_deaths, nrow=2)
+```
+
+We can see here that the states with the highest cases per million are Rhode Island and Alaska, but the states with the highest death rate are Florida and New Mexico, and the lowest death rate being in Hawaii, which seems barely visible.
+
+How many new cases/deaths happened on average per day in the US?
+Let's take a look at what the cases and deaths in the US look like over time.
+
+```{r overtime, fig.height = 6, echo=FALSE, message=FALSE, warning=FALSE}
+# We need to group by date
+US_time <- US %>%
+  group_by(date) %>%
+  summarize(cases = sum(cases),
+            deaths = sum(deaths))
+
+# Line graph of cases
+linear_model <- lm(data = US_time, cases ~ date)
+daily_rate <- prettyNum(unname(round(linear_model$coefficients[2])), big.mark = ",")
+note <- glue('Average of {daily_rate} new cases per day')
+recent_cols <- c("Total"="cornflowerblue", "Linear Model"="blue")
+
+line_cases <- ggplot(US_time, aes(x = date, y = cases)) +
+  geom_line(linewidth = 1.5, aes(colour = "Total")) + # Plot cases with blue line
+  labs(title = "COVID19 Cases in US", x = "Date", y = "Total Cases") +
+  scale_y_continuous(labels = label_comma()) +
+  geom_smooth(method = "lm", aes(colour = "Linear Model")) +
+  annotate("text", x = date("2022-04-01"), y=16000000, 
+           label = note, colour = "blue", size = 3) +
+  scale_colour_manual(name="Key",values=recent_cols, limits = c("Total","Linear Model")) +
+  scale_x_date(date_breaks = "6 months", date_labels = "%m/%y")
+
+# Line graph of deaths
+recent_cols <- c("Total"="red", "Linear Model"="firebrick")
+linear_model <- lm(data = US_time, deaths ~ date)
+daily_rate <- prettyNum(unname(round(linear_model$coefficients[2])), big.mark = ",")
+note <- glue('Average of {daily_rate} deaths per day')
+
+line_deaths <- ggplot(US_time, aes(x = date, y = deaths)) +
+  geom_line(linewidth = 1.5, aes(colour = "Total")) + # Plot cases with blue line
+  labs(title = "COVID19 Deaths in US", x = "Date", y = "Total Deaths") +
+  scale_y_continuous(labels = label_comma()) +
+  geom_smooth(method = "lm", aes(colour = "Linear Model")) +
+  annotate("text", x = date("2022-04-01"), y=375000, 
+           label = note, colour = "firebrick", size = 3) +
+  scale_colour_manual(name="Key",values=recent_cols, limits = c("Total","Linear Model")) +
+  scale_x_date(date_breaks = "6 months", date_labels = "%m/%y")
+
+grid.arrange(line_cases, line_deaths, nrow=2)
+```
+
+In the US, there were approximately 108,721 new cases every day between January 22, 2020 and March 9, 2023. There was also an average of 1,126 deaths every day over those 3 years, resulting in a total of 1,123,836 deaths from COVID 19. With a US population of 329,466,283 that is approximately 0.34% of our population. With the total of 103,802,702 cases, 1.1% of COVID 19 cases resulted in death.
+
+## Potential Bias in the Dataset
+
+The data is only as accurate as the reports. People may have been suffering from COVID at home without being diagnosed, meaning that COVID cases could be under-represented. Deaths, on the other hand, are always reported. This means that the 1.1% death rate of COVID cases could be overestimated.
+
+Another source of bias could be due to countries not reporting accurate numbers or information. For instance, North Korea had 1 case and 6 deaths. It is not possible to have more deaths than cases due to COVID 19, so it is likely that either the information being distributed from North Korea is incorrect or there is a typo in the data.
